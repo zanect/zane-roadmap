@@ -1,0 +1,10 @@
+data/*.parquet
+data/*.csv
+data/*.db
+data/*.pkl
+output/*.html
+output/*.parquet
+__pycache__/
+*.pyc
+.env
+.superpowers/

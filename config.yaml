@@ -1,0 +1,35 @@
+date: "2026-06-07"
+
+# CSV 轨迹数据文件路径 (从 ClickHouse 导出)
+trajectory:
+  csv_path: "data/trajectory_2026-06-07.csv"
+
+road_network:
+  city: "杭州市"
+  highway_types:
+    - motorway
+    - trunk
+    - primary
+    - secondary
+    - tertiary
+    - residential
+
+preprocess:
+  min_speed_ms: 0.5
+  max_jump_m: 500
+  trip_gap_minutes: 5
+  dp_epsilon_m: 10
+
+matching:
+  observation_sigma: 10
+  candidate_radius: 30
+  max_workers: 8
+  device_chunk_size: 200
+
+stats:
+  segment_length_m: 50
+
+output:
+  dir: "output"
+  parquet: "roads_coverage.parquet"
+  map: "coverage_map.html"

@@ -1,5 +1,7 @@
 """
 多进程并行地图匹配 + tqdm 进度展示。
+
+大文件优化：按设备批次流式读取，不将全量数据加载到内存。
 """
 import pandas as pd
 from typing import List, Dict, Any
@@ -11,21 +13,37 @@ import traceback
 
 
 def match_device_batch(
-    batch_data: pd.DataFrame,
+    device_ids: List[str],
+    parquet_path: str,
     mmap_db_path: str,
     config: dict,
 ) -> List[Dict[str, Any]]:
-    """子进程中执行一批设备的匹配 (独立进程入口)"""
+    """
+    子进程中执行一批设备的匹配 (独立进程入口)。
+
+    进程内自行读取数据，避免通过 pickle 传递大 DataFrame。
+    """
     from leuvenmapmatching.map.sqlite import SqliteMap
     from src.preprocess.clean import preprocess_device
     from src.matching.hmm_matcher import match_trip
+    import duckdb
 
     mmap = SqliteMap(mmap_db_path, use_latlon=True)
     preprocess_cfg = config["preprocess"]
     matching_cfg = config["matching"]
     all_results = []
 
-    for device_id, device_df in batch_data.groupby("device_id"):
+    # 子进程内按需加载本批次数据
+    ids_str = ", ".join(f"'{d}'" for d in device_ids)
+    con = duckdb.connect()
+    df = con.execute(f"""
+        SELECT * FROM '{parquet_path}'
+        WHERE device_id IN ({ids_str})
+        ORDER BY device_id, timestamp
+    """).df()
+    con.close()
+
+    for device_id, device_df in df.groupby("device_id"):
         trips = preprocess_device(
             device_df,
             min_speed_ms=preprocess_cfg["min_speed_ms"],
@@ -57,29 +75,38 @@ def run_map_matching(
     mmap_db_path: str,
     config: dict,
 ) -> pd.DataFrame:
-    """并行地图匹配入口"""
-    df = pd.read_parquet(trips_parquet)
-    device_ids = df["device_id"].unique()
+    """
+    并行地图匹配入口 — 流式处理大文件。
+
+    1. 先查询所有设备 ID (极快，只读元数据)
+    2. 按 chunk_size 切分设备 ID 列表
+    3. 每个子进程自行按需加载数据 → 匹配
+    """
+    from src.data.trajectory import get_device_ids
+
+    trips_parquet = str(trips_parquet)
+    device_ids = get_device_ids(Path(trips_parquet))
     total_devices = len(device_ids)
 
     chunk_size = config["matching"]["device_chunk_size"]
     max_workers = config["matching"]["max_workers"]
 
-    device_groups = list(df.groupby("device_id"))
-    batches = []
-    for i in range(0, len(device_groups), chunk_size):
-        batch_devices = device_groups[i:i + chunk_size]
-        batch_df = pd.concat([d for _, d in batch_devices])
-        batches.append(batch_df)
+    # 只切分 ID 列表，不加载数据
+    id_batches = [
+        list(device_ids[i:i + chunk_size])
+        for i in range(0, total_devices, chunk_size)
+    ]
 
-    print(f"总设备数: {total_devices}, 批次数: {len(batches)}, 进程数: {max_workers}")
+    print(f"总设备数: {total_devices}, 批次数: {len(id_batches)}, 进程数: {max_workers}")
 
     all_matched = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(match_device_batch, batch, mmap_db_path, config): idx
-            for idx, batch in enumerate(batches)
+            executor.submit(
+                match_device_batch, batch_ids, trips_parquet, mmap_db_path, config
+            ): idx
+            for idx, batch_ids in enumerate(id_batches)
         }
 
         with tqdm(total=total_devices, desc="匹配进度", unit="dev") as pbar:
@@ -93,11 +120,11 @@ def run_map_matching(
                     print(f"\n批次 {batch_idx} 出错: {e}")
                     traceback.print_exc()
 
-                batch_size = len(batches[batch_idx]["device_id"].unique())
+                batch_size = len(id_batches[batch_idx])
                 pbar.update(batch_size)
                 pbar.set_postfix({
                     "匹配trip数": len(all_matched),
-                    "批": f"{batch_idx + 1}/{len(batches)}",
+                    "批": f"{batch_idx + 1}/{len(id_batches)}",
                 })
 
     return _nodes_to_ways(all_matched, config)

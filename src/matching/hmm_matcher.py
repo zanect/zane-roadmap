@@ -3,6 +3,7 @@
 
 使用 leuvenmapmatching 的 DistanceMatcher 将 trip LineString 匹配到路网节点。
 """
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 from shapely.geometry import LineString
@@ -20,10 +21,6 @@ class TripMatchResult:
 
 
 def trip_to_observations(trip: LineString) -> List[tuple]:
-    """
-    将 trip LineString 转换为观测序列 (lat, lon) 格式。
-    leuvenmapmatching 使用 (lat, lon) 顺序。
-    """
     coords = list(trip.coords)
     return [(lat, lon) for lon, lat in coords]
 
@@ -31,8 +28,9 @@ def trip_to_observations(trip: LineString) -> List[tuple]:
 def match_trip(
     mmap: BaseMap,
     trip: LineString,
-    observation_sigma: float = 10.0,
+    observation_sigma: float = 25.0,
     min_matched_ratio: float = 0.3,
+    verbose: bool = False,
 ) -> Optional[TripMatchResult]:
     """
     对单个 trip 执行 HMM 地图匹配。
@@ -40,30 +38,39 @@ def match_trip(
     Args:
         mmap: leuvenmapmatching 地图对象
         trip: trip 折线 (WGS-84)
-        observation_sigma: 观测噪声标准差 (米)
+        observation_sigma: 观测噪声标准差 (米), 默认 25m (GPS 精度)
         min_matched_ratio: 最小匹配比例
-
-    Returns:
-        匹配结果，或 None（匹配失败）
+        verbose: 是否打印内部耗时
     """
     observations = trip_to_observations(trip)
 
     if len(observations) < 2:
         return None
 
+    if verbose:
+        print(f"    HMM匹配: {len(observations)} 个观测点...", end=" ", flush=True)
+        t0 = time.time()
+
     matcher = DistanceMatcher(
         mmap,
-        max_dist_init=observation_sigma * 3,
-        max_dist=observation_sigma * 2,
+        max_dist_init=observation_sigma * 3,   # 75m 搜索半径
+        max_dist=observation_sigma * 3,
         obs_noise=observation_sigma,
-        non_emitting_states=False,
+        non_emitting_states=True,              # 允许跳过无法匹配的点
         only_edges=False,
     )
 
     try:
         path, _ = matcher.match(observations, unique=False)
-    except Exception:
+    except Exception as e:
+        if verbose:
+            print(f"异常: {e}")
         return None
+
+    if verbose:
+        elapsed = time.time() - t0
+        matched = len([n for n in path if n is not None])
+        print(f"{matched}/{len(observations)} 匹配 ({elapsed:.1f}s)")
 
     if not path:
         return None

@@ -102,7 +102,22 @@ def _extract_sample_points(geometry: LineString) -> np.ndarray:
     return np.array([[p.x, p.y] for p in points])
 
 
+def _safe_str(x) -> str:
+    """将 OSM 字段转字符串，处理 list / None"""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, list):
+        return x[0] if x else ""  # 多语言名取第一个
+    return str(x)
+
+
 def save_results(df: pd.DataFrame, output_path: Path) -> None:
     """保存结果为 Parquet"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(_safe_str)
     df.to_parquet(output_path, index=False)

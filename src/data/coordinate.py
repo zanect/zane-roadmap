@@ -50,16 +50,35 @@ def _delta(lng: float, lat: float) -> Tuple[float, float]:
 
 def gcj02_to_wgs84(lng: Union[float, np.ndarray], lat: Union[float, np.ndarray]) \
         -> Union[Tuple[float, float], Tuple[np.ndarray, np.ndarray]]:
-    """火星坐标系 (GCJ-02) 转 WGS-84"""
+    """
+    火星坐标系 (GCJ-02) 转 WGS-84 (迭代逼近)
+
+    原理: _delta() 的输入是 WGS-84 坐标，但 GCJ→WGS 时我们只有 GCJ 坐标。
+    因此需要迭代: 用 GCJ 坐标作为初始猜测 → 算偏移 → 修正 → 重复直到收敛。
+    精度: < 1m (通常 2-3 次迭代即收敛)
+    """
     scalar = isinstance(lng, (int, float))
     lng = np.atleast_1d(np.asarray(lng, dtype=float))
     lat = np.atleast_1d(np.asarray(lat, dtype=float))
     result_lng = np.empty_like(lng)
     result_lat = np.empty_like(lat)
+
     for i in range(len(lng)):
-        dlng, dlat = _delta(lng[i], lat[i])
-        result_lng[i] = lng[i] - dlng
-        result_lat[i] = lat[i] - dlat
+        gcj_lng, gcj_lat = lng[i], lat[i]
+        # 初始猜测: GCJ 坐标就是 WGS (偏移量 ~300-500m)
+        wgs_lng, wgs_lat = gcj_lng, gcj_lat
+        for _ in range(5):  # 通常 2-3 次收敛, 5 次保底
+            dlng, dlat = _delta(wgs_lng, wgs_lat)
+            new_lng = gcj_lng - dlng
+            new_lat = gcj_lat - dlat
+            # 收敛判断: 变化 < 1e-7 度 (~0.01m)
+            if abs(new_lng - wgs_lng) < 1e-7 and abs(new_lat - wgs_lat) < 1e-7:
+                wgs_lng, wgs_lat = new_lng, new_lat
+                break
+            wgs_lng, wgs_lat = new_lng, new_lat
+        result_lng[i] = wgs_lng
+        result_lat[i] = wgs_lat
+
     if scalar:
         return float(result_lng[0]), float(result_lat[0])
     return result_lng, result_lat
@@ -80,3 +99,4 @@ def wgs84_to_gcj02(lng: Union[float, np.ndarray], lat: Union[float, np.ndarray])
     if scalar:
         return float(result_lng[0]), float(result_lat[0])
     return result_lng, result_lat
+    

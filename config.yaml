@@ -1,11 +1,12 @@
-date: "2026-06-07"
+date: "2026-06-08"
 
-# CSV 轨迹数据文件路径 (从 ClickHouse 导出)
+# CSV 轨迹数据文件路径
 trajectory:
-  csv_path: "data/trajectory_2026-06-07.csv"
+  csv_path: "data/csv/pos/pos.csv"
 
 road_network:
   city: "杭州市"
+  # overpass_endpoint: "https://overpass.kumi.systems/api/interpreter"  # 国内网络如官方不通可取消注释
   highway_types:
     - motorway
     - trunk

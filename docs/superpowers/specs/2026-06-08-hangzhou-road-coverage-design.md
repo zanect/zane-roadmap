@@ -29,11 +29,11 @@
 
 ### 2.2 轨迹数据
 
-- **存储：** ClickHouse 数据库
-- **字段：** `id` (device_id), `lon`, `lat`, `speed`, `height`, `angle`, `timestamp`
-- **坐标系：** GCJ-02（需转换为 WGS-84）
+- **存储：** CSV 文件 (无 header)
+- **字段：** `device_id`, `lon`, `lat`, `speed`, `timestamp_ms`
+- **坐标系：** WGS-84 或 GCJ-02（可配置，GCJ-02 时自动转换为 WGS-84）
 - **规模：** 10 万台设备 × ~500 点/台 ≈ **5000 万行/天**
-- **导出方式：** ClickHouse SQL → Parquet 中间文件
+- **加载方式：** DuckDB 流式 COPY CSV → Parquet 中间文件（~25 秒/13GB）
 
 ---
 
@@ -42,20 +42,20 @@
 ### 3.1 整体架构
 
 ```
-ClickHouse (原始GPS, GCJ-02)
-        ↓ 导出 + 坐标转换 → WGS-84
+CSV 文件 (原始GPS, WGS-84 或 GCJ-02)
+        ↓ DuckDB COPY → Parquet + 坐标转换 → WGS-84
    Parquet (轨迹中间文件)
         ↓ 降噪 + trip切分 + DP抽稀
-   Parquet (trips - 压缩后的trip线段)
+   trips (压缩后的trip线段, 内存)
         ↓ leuvenmapmatching HMM匹配
    Parquet (matched_trips - trip→way_id映射)
         ↓ 分段统计聚合
    Parquet (roads_coverage - 最终结果)
         ↓ folium 可视化
-   coverage_map.html
+   coverage_map.html  +  trajectory_map.html
 ```
 
-OSM 路网 (osmnx) → NetworkX Graph → 构建匹配图 → 输入到 HMM 匹配器
+OSM 路网 (osmnx) → NetworkX Graph → 构建匹配图 (SqliteMap) → 输入到 HMM 匹配器
 
 ### 3.2 Phase 1: 数据获取
 
@@ -64,11 +64,13 @@ OSM 路网 (osmnx) → NetworkX Graph → 构建匹配图 → 输入到 HMM 匹�
 2. 用 `osmnx.graph_from_polygon()` 下载路网图
 3. 过滤道路类型，导出为 NetworkX MultiDiGraph
 4. 构建 `way_id → (node_list, geometry)` 映射表
+5. 支持多 Overpass 端点镜像自动切换
+6. 首次下载后 pickle 缓存到 `data/`，后续秒级加载
 
 **轨迹 (trajectory.py)：**
-1. ClickHouse SQL 查询单日数据，按 `timestamp` 排序，按 `id` (device_id) 分组
-2. 导出为 Parquet（行级，不聚合）
-3. GCJ-02 → WGS-84 坐标转换 (内嵌 `src/data/coordinate.py`，零外部依赖)
+1. DuckDB `read_csv` + `COPY` 一键将 CSV 转为 Parquet (ZSTD 压缩)
+2. 自动过滤无效行 (null device_id、坐标越界)
+3. 按需 GCJ-02 → WGS-84 坐标转换 (分块处理，支持大文件)
 
 ### 3.3 Phase 2: 轨迹预处理
 
@@ -94,29 +96,24 @@ OSM 路网 (osmnx) → NetworkX Graph → 构建匹配图 → 输入到 HMM 匹�
 ### 3.4 Phase 3: 地图匹配
 
 **匹配图构建 (graph.py)：**
-- 将 OSM NetworkX Graph 转换为 `leuvenmapmatching` 的地图对象
-- 构建 `node_id → (lat, lon)` 映射
-- 构建 `node_id → [way_ids]` 映射（一个节点属于哪些路段）
-- 添加路段邻接关系用于拓扑约束
+- 将 OSM NetworkX Graph 转换为 `leuvenmapmatching` 的 SqliteMap
+- 使用 bulk API (`add_nodes`/`add_edges`) 批量写入，避免逐条 SQLite COMMIT
+- 对曲线路段自动插入中间节点，提高匹配精度
+- 82k 节点 + 138k 边从 ~10 分钟降至 ~10 秒
+- 首次构建后缓存为 `.db` 文件，后续直接加载
 
 **HMM 匹配 (hmm_matcher.py)：**
 - 库：`leuvenmapmatching`
-- 观测概率：GPS 点与候选路段的几何距离，σ = 10m
+- 观测概率：GPS 点与候选路段的几何距离，σ = 25m
 - 转移概率：相邻两点间的路径合理性（最短路径长度 vs 直线距离）
 - Viterbi 解码：求解全局最优路段序列
-- 输出：`(trip_id, osm_way_id, segment_offset_start, segment_offset_end)` 列表
+- 输出：`(trip_id, osm_way_id, node_u, node_v)` 列表
 
 **并行调度 (parallel.py)：**
-- 按设备级别并行：每批 200 台设备一个进程
-- `ProcessPoolExecutor` 管理进程池
-- 实时进度展示：`tqdm` 进度条显示已完成/总数、当前速率
-- 预估耗时：8 核 2~4 小时，16 核 1~2 小时
-
-**匹配进度展示：**
-- 在每个 worker 内部用 `tqdm.position` 分层展示
-- 主进度条：设备完成数 / 总设备数
-- 子进度条（可选）：当前批次内 trip 匹配进度
-- 日志输出：每完成 1000 台设备记录一次中间结果和耗时
+- 按设备批次流式读取，不将全量数据加载到内存
+- 设备数 ≤ 50 时使用单进程模式（便于调试日志）
+- 设备数 > 50 时使用 `ProcessPoolExecutor` 多进程并行
+- `tqdm` 实时进度展示设备完成数和匹配 trip 数
 
 ### 3.5 Phase 4: 统计计算
 
@@ -128,20 +125,8 @@ OSM 路网 (osmnx) → NetworkX Graph → 构建匹配图 → 输入到 HMM 匹�
 
 **密度计算：**
 
-- `pass_count = COUNT(DISTINCT trip_id)` → 按 `osm_way_id` 分组
+- `pass_count = COUNT(DISTINCT trip_id)` → 按 `osm_way_id` 分组 (pandas groupby)
 - 一个 trip 经过同一路段多次 → 只算 1 次（自然去重）
-
-**聚合方式：** DuckDB SQL
-
-```sql
-SELECT
-    osm_way_id,
-    COUNT(DISTINCT trip_id) AS pass_count
-FROM matched_trips
-GROUP BY osm_way_id
-```
-
-然后 join 回路段几何，计算分段覆盖率。
 
 **最终输出 Schema (`roads_coverage.parquet`)：**
 
@@ -157,19 +142,20 @@ GROUP BY osm_way_id
 
 ### 3.6 Phase 5: 可视化
 
-**工具：** `folium`
-
-**输出：** 单个 `coverage_map.html` 文件
-
-**图层：**
-
+**覆盖率地图 (map.py)：** `folium` 双图层：
 | 图层 | 内容 | 视觉编码 |
 |------|------|---------|
 | 覆盖率 Choropleth | 每路段按覆盖率着色 | 🟢 >80% · 🟡 40-80% · 🔴 <40% |
 | 密度 Heatmap | 每路段按通行次数 | 线宽/颜色深浅映射 |
 | 综合叠加 | 两图层可切换 | `folium.LayerControl` |
 
-**底图：** OpenStreetMap（默认）或高德卫星图（tile URL 替换）
+**轨迹地图 (trajectory_map.py)：** `folium` 设备轨迹可视化：
+- 每条设备轨迹渲染为折线
+- 起点蓝色标记、终点红色标记
+- 自动适配地图视野范围
+- 大数据量自动降采样（每设备最多 5000 点）
+
+**底图：** OpenStreetMap
 
 ---
 
@@ -180,7 +166,7 @@ cover/
 ├── src/
 │   ├── data/
 │   │   ├── road_network.py          # osmnx 下载路网
-│   │   ├── trajectory.py            # ClickHouse 导出
+│   │   ├── trajectory.py            # CSV → Parquet + 坐标转换
 │   │   └── coordinate.py            # GCJ-02 ↔ WGS-84 转换 (内嵌)
 │   ├── preprocess/
 │   │   └── clean.py                 # 降噪 + trip切分 + DP抽稀
@@ -191,11 +177,15 @@ cover/
 │   ├── stats/
 │   │   └── coverage.py              # 覆盖率 + 密度聚合
 │   └── viz/
-│       └── map.py                   # folium 可视化
+│       ├── map.py                   # folium 覆盖率地图
+│       └── trajectory_map.py        # folium 轨迹可视化
+├── scripts/
+│   └── export_geojson.py            # 路网导出 GeoJSON
 ├── data/                            # 中间数据 (gitignore)
 ├── output/                          # 最终输出
 │   ├── roads_coverage.parquet
-│   └── coverage_map.html
+│   ├── coverage_map.html
+│   └── trajectory_map.html
 ├── main.py                          # 主入口脚本
 ├── config.yaml                      # 配置
 └── requirements.txt
@@ -207,18 +197,16 @@ cover/
 
 ```yaml
 # 目标日期
-date: "2026-06-07"
+date: "2026-06-08"
 
-# ClickHouse 连接
-clickhouse:
-  host: "localhost"
-  port: 9000
-  database: "trajectory"
-  table: "gps_data"
+# CSV 轨迹数据文件路径
+trajectory:
+  csv_path: "data/csv/pos/pos.csv"
 
 # 路网
 road_network:
   city: "杭州市"
+  # overpass_endpoint: "https://overpass.kumi.systems/api/interpreter"  # 国内网络如官方不通可取消注释
   highway_types:
     - motorway
     - trunk
@@ -236,7 +224,7 @@ preprocess:
 
 # 地图匹配参数
 matching:
-  observation_sigma: 10    # 观测噪声 (m)
+  observation_sigma: 25    # 观测噪声 (m)
   candidate_radius: 30     # 候选路段搜索半径 (m)
   max_workers: 8           # 并行进程数
   device_chunk_size: 200   # 每批次设备数
@@ -263,7 +251,6 @@ output:
 | `osmnx` | **2.1.0** | 2026-02 | ≥3.9 | ✅ 活跃 |
 | `leuvenmapmatching` | **1.1.4** | 2022-12 | ≥3.8 | ⚠️ 纯Python，兼容 numpy 2.x |
 | `duckdb` | **1.5.3** | 2026-05 | ≥3.8 | ✅ 最活跃 |
-| `clickhouse-driver` | **0.2.10** | 2025-11 | ≥3.7 | ✅ 稳定 |
 | `shapely` | **2.1.2** | 2025-09 | ≥3.9 | ✅ 最新稳定 |
 | `geopandas` | **1.1.3** | 2026-03 | ≥3.9 | ✅ 活跃 |
 | `folium` | **0.20.0** | 2025-06 | ≥3.8 | ✅ 稳定 |
@@ -324,7 +311,7 @@ def gcj02_to_wgs84(lng, lat):
     return lng - dlng, lat - dlat
 ```
 
-放入 `src/data/coordinate.py`，零外部依赖。
+放入 `src/data/coordinate.py`，零外部依赖。GCJ→WGS 采用迭代逼近，精度 < 1m。
 
 ### 6.4 requirements.txt
 
@@ -332,7 +319,6 @@ def gcj02_to_wgs84(lng, lat):
 osmnx==2.1.0
 leuvenmapmatching==1.1.4
 duckdb==1.5.3
-clickhouse-driver==0.2.10
 shapely==2.1.2
 geopandas==1.1.3
 folium==0.20.0
@@ -340,6 +326,7 @@ numpy==2.4.6
 scipy==1.17.1
 tqdm==4.68.1
 pyyaml==6.0.3
+pytest==8.4.2
 ```
 
 ---
@@ -350,29 +337,28 @@ pyyaml==6.0.3
 def main():
     config = load_config("config.yaml")
 
-    # Step 1: 获取路网
-    G, way_map = load_road_network(config)
+    # Step 1: 获取路网 (首次下载 OSM，后续从 pickle 缓存加载)
+    G, way_map = load_road_network(config, force_download=args.force)
 
-    # Step 2: 导出轨迹 + 坐标转换
-    raw_trajectory = export_trajectory(config)
+    # Step 2: 构建 HMM 匹配图 (bulk 写入 SqliteMap，首次 ~10s，后续直接加载 .db)
+    mmap = build_matching_map(G, mmap_db_path)
 
-    # Step 3: 降噪 + trip 切分 + 抽稀
-    trips = preprocess_trajectory(raw_trajectory, config)
+    # Step 3: CSV → Parquet + 坐标转换 (DuckDB COPY，GCJ-02 → WGS-84)
+    raw_path = load_csv_to_parquet(Path(csv_path))
+    wgs84_path = convert_coordinates(raw_path)  # 若已是 WGS-84 则跳过
 
-    # Step 4: 构建匹配图
-    mmap = build_matching_graph(G, way_map)
+    # Step 4: 轨迹预处理 + 并行地图匹配 (降噪 → trip切分 → DP抽稀 → HMM)
+    matched_df = run_map_matching(wgs84_path, mmap_db_path, config)
 
-    # Step 5: HMM 匹配 (并行 + 进度条)
-    matched = run_map_matching(mmap, trips, config)
+    # Step 5: 统计聚合 (50m 分段覆盖率 + 密度)
+    coverage_df = compute_coverage(matched_df, way_map, segment_length_m=50)
+    save_results(coverage_df, parquet_path)
 
-    # Step 6: 统计聚合
-    coverage = compute_coverage(matched, way_map, config)
+    # Step 6: 覆盖率地图 (folium 双图层)
+    render_map(parquet_path, map_path)
 
-    # Step 7: 持久化
-    coverage.to_parquet("output/roads_coverage.parquet")
-
-    # Step 8: 可视化
-    render_map(coverage, "output/coverage_map.html")
+    # Step 7: 轨迹地图 (设备轨迹折线可视化)
+    render_trajectory_map(wgs84_path, traj_map_path)
 ```
 
 ---
@@ -382,4 +368,14 @@ def main():
 - **不纳入范围：** 实时查询、增量更新、多日趋势分析（当前只做单日）
 - **精度预期：** HMM 匹配对大部分城市道路准确率 >85%；立交桥、隧道、密集平行道路可能有误匹配
 - **运行环境：** 单机多核，不依赖 GPU 或分布式集群
-- **坐标系：** 内部统一使用 WGS-84，仅在 ClickHouse 导出阶段做 GCJ-02 转换
+- **坐标系：** 内部统一使用 WGS-84，CSV 加载阶段按需做 GCJ-02 → WGS-84 转换
+
+---
+
+## 9. 已知性能瓶颈
+
+| # | 位置 | 原因 | 影响 | 状态 |
+|---|------|------|------|------|
+| 1 | HMM 地图匹配 (Viterbi) | O(T×K²)，T=观测点数，K=每点候选路段数。对大规模路网 + 长 trip 慢 | 单设备可能数分钟 | 待优化 |
+| 2 | folium 渲染 | 8 万条 PolyLine 生成 HTML，可能几百 MB | ~30-60s | 待优化 |
+| 3 | CSV→Parquet 大文件 | 13 GB CSV 内存峰值 ~2GB (DuckDB COPY) | 需 16GB+ RAM | ✅ 已优化 (流式 COPY) |

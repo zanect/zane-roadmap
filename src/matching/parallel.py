@@ -2,7 +2,9 @@
 多进程并行地图匹配 + tqdm 进度展示。
 
 大文件优化：按设备批次流式读取，不将全量数据加载到内存。
+单设备/小批量场景：详细打印每步耗时。
 """
+import time
 import pandas as pd
 from typing import List, Dict, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -19,21 +21,21 @@ def match_device_batch(
     config: dict,
 ) -> List[Dict[str, Any]]:
     """
-    子进程中执行一批设备的匹配 (独立进程入口)。
-
-    进程内自行读取数据，避免通过 pickle 传递大 DataFrame。
+    子进程入口：加载本批设备数据 → 预处理 → HMM 匹配。
     """
     from leuvenmapmatching.map.sqlite import SqliteMap
     from src.preprocess.clean import preprocess_device
     from src.matching.hmm_matcher import match_trip
     import duckdb
 
+    t0 = time.time()
+    # 子进程中必须用绝对路径 (SqliteMap 默认 dir 是系统临时目录)
+    mmap_db_path = str(Path(mmap_db_path).resolve())
     mmap = SqliteMap(mmap_db_path, use_latlon=True)
     preprocess_cfg = config["preprocess"]
     matching_cfg = config["matching"]
     all_results = []
 
-    # 子进程内按需加载本批次数据
     ids_str = ", ".join(f"'{d}'" for d in device_ids)
     con = duckdb.connect()
     df = con.execute(f"""
@@ -43,7 +45,13 @@ def match_device_batch(
     """).df()
     con.close()
 
-    for device_id, device_df in df.groupby("device_id"):
+    n_devices = len(device_ids)
+    n_rows = len(df)
+
+    for di, (device_id, device_df) in enumerate(df.groupby("device_id")):
+        t_dev = time.time()
+        raw_pts = len(device_df)
+
         trips = preprocess_device(
             device_df,
             min_speed_ms=preprocess_cfg["min_speed_ms"],
@@ -52,11 +60,23 @@ def match_device_batch(
             dp_epsilon_m=preprocess_cfg["dp_epsilon_m"],
         )
 
+        prep_time = time.time() - t_dev
+        n_trips = len(trips)
+        total_obs = sum(len(list(t.coords)) for t in trips)
+
+        # 单设备 / 少量设备时打印详情
+        verbose = n_devices <= 10
+        if verbose:
+            print(f"  [{di+1}/{n_devices}] device={device_id}: "
+                  f"{raw_pts} 原始点 → {n_trips} trips → ~{total_obs} 观测点 "
+                  f"(预处理 {prep_time:.1f}s)")
+
         for trip_idx, trip in enumerate(trips):
             trip_id = f"{device_id}_{trip_idx}"
             result = match_trip(
                 mmap, trip,
-                observation_sigma=matching_cfg["observation_sigma"],
+                observation_sigma=matching_cfg.get("observation_sigma", 25),
+                verbose=verbose,
             )
             if result is not None and result.matched_edges:
                 all_results.append({
@@ -67,6 +87,9 @@ def match_device_batch(
                     "match_ratio": result.match_ratio,
                 })
 
+    elapsed = time.time() - t0
+    if len(device_ids) <= 10:
+        print(f"  ← 批次完成: {len(all_results)} trip匹配, {elapsed:.0f}s")
     return all_results
 
 
@@ -75,13 +98,7 @@ def run_map_matching(
     mmap_db_path: str,
     config: dict,
 ) -> pd.DataFrame:
-    """
-    并行地图匹配入口 — 流式处理大文件。
-
-    1. 先查询所有设备 ID (极快，只读元数据)
-    2. 按 chunk_size 切分设备 ID 列表
-    3. 每个子进程自行按需加载数据 → 匹配
-    """
+    """并行地图匹配入口 — 流式处理大文件"""
     from src.data.trajectory import get_device_ids
 
     trips_parquet = str(trips_parquet)
@@ -91,41 +108,50 @@ def run_map_matching(
     chunk_size = config["matching"]["device_chunk_size"]
     max_workers = config["matching"]["max_workers"]
 
-    # 只切分 ID 列表，不加载数据
     id_batches = [
         list(device_ids[i:i + chunk_size])
         for i in range(0, total_devices, chunk_size)
     ]
 
-    print(f"总设备数: {total_devices}, 批次数: {len(id_batches)}, 进程数: {max_workers}")
+    print(f"[匹配] 设备总数: {total_devices}, 批次: {len(id_batches)}, "
+          f"进程: {max_workers}, 每批设备: {chunk_size}")
 
     all_matched = []
+    t0 = time.time()
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                match_device_batch, batch_ids, trips_parquet, mmap_db_path, config
-            ): idx
-            for idx, batch_ids in enumerate(id_batches)
-        }
+    # 少量设备时用单进程 (避免多进程开销，方便看日志)
+    if total_devices <= 50:
+        print("[匹配] 设备数少，使用单进程模式")
+        for idx, batch_ids in enumerate(id_batches):
+            results = match_device_batch(
+                batch_ids, trips_parquet, mmap_db_path, config
+            )
+            if results:
+                all_matched.extend(results)
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    match_device_batch, batch_ids, trips_parquet, mmap_db_path, config
+                ): idx
+                for idx, batch_ids in enumerate(id_batches)
+            }
 
-        with tqdm(total=total_devices, desc="匹配进度", unit="dev") as pbar:
-            for future in as_completed(futures):
-                batch_idx = futures[future]
-                try:
-                    results = future.result()
-                    if results:
-                        all_matched.extend(results)
-                except Exception as e:
-                    print(f"\n批次 {batch_idx} 出错: {e}")
-                    traceback.print_exc()
+            with tqdm(total=total_devices, desc="匹配进度", unit="dev") as pbar:
+                for future in as_completed(futures):
+                    batch_idx = futures[future]
+                    try:
+                        results = future.result()
+                        if results:
+                            all_matched.extend(results)
+                    except Exception as e:
+                        print(f"\n批次 {batch_idx} 出错: {e}")
+                        traceback.print_exc()
+                    pbar.update(len(id_batches[batch_idx]))
+                    pbar.set_postfix({"匹配trip": len(all_matched)})
 
-                batch_size = len(id_batches[batch_idx])
-                pbar.update(batch_size)
-                pbar.set_postfix({
-                    "匹配trip数": len(all_matched),
-                    "批": f"{batch_idx + 1}/{len(id_batches)}",
-                })
+    elapsed = time.time() - t0
+    print(f"[匹配] 完成: {len(all_matched)} trip匹配 ({elapsed:.0f}s)")
 
     return _nodes_to_ways(all_matched, config)
 

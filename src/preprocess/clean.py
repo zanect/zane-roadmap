@@ -34,6 +34,12 @@ def denoise_trajectory(df: pd.DataFrame, min_speed_ms: float = 0.5,
 
     for i in range(1, len(df) - 1):
         dist_to_prev = _haversine_distance(lons[i], lats[i], lons[i - 1], lats[i - 1])
+
+        # 完全重复的坐标 (传感器卡死 / 数据重复上报)
+        if dist_to_prev < 0.1:
+            mask[i] = False
+            continue
+
         if speeds[i] < min_speed_ms and dist_to_prev < 5:
             mask[i] = False
             continue

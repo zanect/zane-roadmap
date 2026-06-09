@@ -87,6 +87,7 @@ def compute_coverage(
             "coverage_ratio": round(coverage_ratio, 4),
             "pass_count": pass_count,
             "highway_type": way_info.get("highway", ""),
+            "district": way_info.get("district", ""),
             "geometry": geometry.wkt,
         })
 

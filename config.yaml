@@ -1,8 +1,8 @@
-date: "2026-06-08_hz_test"
+date: "2026-06-08_hz"
 
 # CSV 轨迹数据文件路径
 trajectory:
-  csv_path: "data/csv/test/hz_test.csv"
+  csv_path: "data/csv/pos/hz_area.csv"
   coord_system: "wgs84"
 
 road_network:
@@ -25,14 +25,22 @@ preprocess:
   dp_epsilon_m: 5          # DP 抽稀阈值 (米)，降低以减少拐点丢失
 
 matching:
-  observation_sigma: 30   # GPS 观测噪声标准差 (米)，提高以容忍更大漂移
-  max_dist_init: 600      # 首个观测点搜索半径 (米)
-  max_dist: 400           # 匹配过程硬截断距离 (米)
-  max_lattice_width: 40   # 每观测点最多候选状态数
-  min_matched_ratio: 0.15 # 最小匹配比例，降低以保留部分匹配的 trip
+  observation_sigma: 30   # GPS 观测噪声标准差 (米)，民用 GPS 典型 10-30m
+  dist_noise: 50          # 转移概率距离噪声 (米)，1s 间隔下道路/直线距离差通常 < 50m
+  max_dist_init: 900      # 首个观测点空间搜索半径 (米)，需要足够大以覆盖 GPS 偏移 (仅第一步)
+  max_dist: 450           # 后续步硬截断距离 (米)，需覆盖 GPS 误差 + GCJ 偏移
+  max_lattice_width: 40   # 每观测点最多候选状态数 (速度关键参数)
+  min_matched_ratio: 0.05
   candidate_radius: 75
   max_workers: 8
   device_chunk_size: 200
+  # ── 非发射状态控制 ──
+  non_emitting_states_maxnb: 40   # 最多连续非发射步数 (默认100, 高频 GPS 应缩小)
+  ne_length_factor: 0.75          # 非发射状态长度惩罚因子 (默认0.75)
+  # ── 转移惩罚因子 (值越大越宽松) ──
+  goback_on_edge_factor: 0.7           # 在同一路段上回头的惩罚 (默认0.5)
+  goback_to_edge_factor: 0.7           # 返回已访问路段的惩罚 (默认0.5)
+  not_connected_edges_factor: 0.6      # 跳到非连通路段的惩罚 (默认0.5)
 
 stats:
   segment_length_m: 50
@@ -41,3 +49,7 @@ output:
   dir: "output"
   parquet: "roads_coverage.parquet"
   map: "coverage_map.html"
+
+logging:
+  log_dir: "logs"            # 日志输出目录
+  verbose: true              # true=终端+文件, false=仅写入文件

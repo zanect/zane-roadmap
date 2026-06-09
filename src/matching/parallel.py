@@ -27,11 +27,34 @@ def match_device_batch(
     from src.preprocess.clean import preprocess_device
     from src.matching.hmm_matcher import match_trip
     import duckdb
+    from collections import Counter
 
     t0 = time.time()
     # 子进程中必须用绝对路径 (SqliteMap 默认 dir 是系统临时目录)
-    mmap_db_path = str(Path(mmap_db_path).resolve())
-    mmap = SqliteMap(mmap_db_path, use_latlon=True)
+    # 必须传 deserializing=True，否则 create_db() 会 DROP 已有表
+    db_path = Path(mmap_db_path).resolve()
+    mmap = SqliteMap(db_path.name, dir=str(db_path.parent), use_latlon=True, deserializing=True)
+
+    # 替换 edges_closeto 以收集统计 (多进程模式下库内 print 已被进程池隔离)
+    _original_edges_closeto = mmap.edges_closeto
+    _stats = Counter()  # key = (rounded_lat, rounded_lon), value = count
+
+    def _edges_closeto_stats(loc, max_dist=None, max_elmt=None):
+        _stats[(round(loc[0], 4), round(loc[1], 4))] += 1
+        return _original_edges_closeto(loc, max_dist, max_elmt)
+
+    mmap.edges_closeto = _edges_closeto_stats
+
+    # nodes_nbrto 返回结果按节点 ID 排序，消除 SQLite 无 ORDER BY 导致的非确定性
+    _original_nodes_nbrto = mmap.nodes_nbrto
+
+    def _nodes_nbrto_deterministic(node):
+        results = _original_nodes_nbrto(node)
+        results.sort(key=lambda x: x[0])  # 按邻居节点 ID 排序
+        return results
+
+    mmap.nodes_nbrto = _nodes_nbrto_deterministic
+
     preprocess_cfg = config["preprocess"]
     matching_cfg = config["matching"]
     all_results = []
@@ -75,7 +98,11 @@ def match_device_batch(
             trip_id = f"{device_id}_{trip_idx}"
             result = match_trip(
                 mmap, trip,
-                observation_sigma=matching_cfg.get("observation_sigma", 25),
+                observation_sigma=matching_cfg.get("observation_sigma", 30),
+                max_dist_init=matching_cfg.get("max_dist_init", 600),
+                max_dist=matching_cfg.get("max_dist", 400),
+                max_lattice_width=matching_cfg.get("max_lattice_width", 40),
+                min_matched_ratio=matching_cfg.get("min_matched_ratio", 0.15),
                 verbose=verbose,
             )
             if result is not None and result.matched_edges:
@@ -89,7 +116,10 @@ def match_device_batch(
 
     elapsed = time.time() - t0
     if len(device_ids) <= 10:
-        print(f"  ← 批次完成: {len(all_results)} trip匹配, {elapsed:.0f}s")
+        total_edges_closeto = sum(_stats.values())
+        unique_locs = len(_stats)
+        print(f"  ← 批次完成: {len(all_results)} trip匹配, {elapsed:.0f}s "
+              f"(edges_closeto: {total_edges_closeto}次调用 / {unique_locs}个近似坐标)")
     return all_results
 
 
@@ -158,7 +188,7 @@ def run_map_matching(
 
 def _nodes_to_ways(results: List[Dict], config: dict) -> pd.DataFrame:
     """将匹配结果中的节点序列转换为 way 序列"""
-    node_ways_path = Path("data") / f"node_ways_{config['date']}.pkl"
+    node_ways_path = Path("data") / "node_ways.pkl"
 
     if node_ways_path.exists():
         with open(node_ways_path, "rb") as f:

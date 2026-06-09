@@ -19,16 +19,25 @@ CHUNK_SIZE = 1_000_000
 def load_csv_to_parquet(
     csv_path: Path,
     output_path: Optional[Path] = None,
+    force: bool = False,
 ) -> Path:
     """
     从 CSV 加载轨迹数据 → Parquet（DuckDB 流式 COPY，一次完成）。
 
     13 GB CSV 约 25 秒，无分块。处理后从 Parquet 读取再做分块进度展示。
     COPY 内置进度条提供百分比反馈。
+
+    若 output_path 已存在且 force=False，直接返回（缓存命中）。
     """
     csv_path = Path(csv_path)
     if output_path is None:
         output_path = csv_path.with_suffix(".parquet")
+
+    if not force and output_path.exists():
+        total_rows = _count_parquet(output_path)
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"[CSV→Parquet] 缓存命中: {total_rows:,} 行 → {size_mb:.0f} MB")
+        return output_path
 
     csv_str = str(csv_path.resolve()).replace("\\", "/")
     out_str = str(output_path.resolve()).replace("\\", "/")
@@ -79,11 +88,14 @@ def convert_coordinates(
     input_path: Path,
     output_path: Optional[Path] = None,
     chunk_size: int = CHUNK_SIZE,
+    force: bool = False,
 ) -> Path:
     """
     分块转换坐标 GCJ-02 → WGS-84。
 
     逐批读取 → numpy 转换 → 逐批追加写入 (通过 pyarrow ParquetWriter)。
+
+    若 output_path 已存在且 force=False，直接返回（缓存命中）。
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -92,6 +104,12 @@ def convert_coordinates(
     if output_path is None:
         stem = input_path.stem
         output_path = input_path.parent / f"{stem}_wgs84.parquet"
+
+    if not force and output_path.exists():
+        total = _count_parquet(output_path)
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"  坐标转换缓存命中: {total:,} 行 → {size_mb:.0f} MB")
+        return output_path
 
     total = _count_parquet(input_path)
     print(f"  总行数: {total:,}, 分块大小: {chunk_size:,}, "

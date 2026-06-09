@@ -1,9 +1,9 @@
-date: "2026-06-08"
+date: "2026-06-08_hz_test"
 
 # CSV 轨迹数据文件路径
 trajectory:
-  csv_path: "data/csv/pos/hz_area.csv"
-  coord_system: "gcj02"  # 中国 GPS 数据通常为 GCJ-02，需转换为 WGS-84
+  csv_path: "data/csv/test/hz_test.csv"
+  coord_system: "wgs84"
 
 road_network:
   city: "杭州市"
@@ -15,15 +15,21 @@ road_network:
     - secondary
     - tertiary
     - residential
+    - unclassified
+    - service
 
 preprocess:
   min_speed_ms: 0.5
   max_jump_m: 500
   trip_gap_minutes: 5
-  dp_epsilon_m: 10
+  dp_epsilon_m: 5          # DP 抽稀阈值 (米)，降低以减少拐点丢失
 
 matching:
-  observation_sigma: 25   # GPS 观测噪声标准差 (米)，搜索半径 = 3x = 75m
+  observation_sigma: 30   # GPS 观测噪声标准差 (米)，提高以容忍更大漂移
+  max_dist_init: 600      # 首个观测点搜索半径 (米)
+  max_dist: 400           # 匹配过程硬截断距离 (米)
+  max_lattice_width: 40   # 每观测点最多候选状态数
+  min_matched_ratio: 0.15 # 最小匹配比例，降低以保留部分匹配的 trip
   candidate_radius: 75
   max_workers: 8
   device_chunk_size: 200

@@ -1,29 +1,40 @@
 """
 Folium 交互式地图可视化。
 
-生成双图层 HTML 地图：
-1. 覆盖率 Choropleth（红-黄-绿）
-2. 覆盖密度（线宽映射）
+生成三层 HTML 地图：
+1. 全路网背景（灰白色，80% 透明度）
+2. 覆盖路段（深蓝色，深浅对应 pass_count 频次）
+3. 图例
 """
 import pandas as pd
 import folium
 from shapely import wkt
 from pathlib import Path
+import numpy as np
 
 
-def _coverage_color(ratio: float) -> str:
-    if ratio > 0.8:
-        return "#2ecc71"
-    elif ratio > 0.4:
-        return "#f1c40f"
-    else:
-        return "#e74c3c"
+def _blue_intensity(pass_count: int, max_count: int) -> tuple:
+    """pass_count → (color, opacity, weight)
 
+    频次越高蓝色越深、线越粗。
+    """
+    if max_count <= 1:
+        return "#1a237e", 0.75, 4
 
-def _density_weight(pass_count: int, max_count: int) -> float:
-    if max_count == 0:
-        return 2
-    return 2 + (pass_count / max_count) * 8
+    # 对数映射，避免长尾被极值压扁
+    log_p = np.log1p(pass_count)
+    log_max = np.log1p(max_count)
+    t = log_p / log_max  # 0..1
+
+    # 深蓝渐变: 浅蓝(#64b5f6) → 深蓝(#0d47a1)
+    r = int(100 - t * 87)       # 100 → 13
+    g = int(181 - t * 111)      # 181 → 70
+    b = int(246 - t * 85)       # 246 → 161
+    color = f"#{r:02x}{g:02x}{b:02x}"
+
+    opacity = 0.40 + t * 0.55   # 0.40 → 0.95
+    weight = 3.0 + t * 5.0      # 3.0 → 8.0
+    return color, opacity, weight
 
 
 def render_map(
@@ -32,68 +43,67 @@ def render_map(
     center_lat: float = 30.274,
     center_lon: float = 120.155,
 ) -> None:
-    """生成可视化地图"""
+    """生成覆盖率可视化地图"""
     df = pd.read_parquet(coverage_path)
     df["geometry"] = df["geometry"].apply(wkt.loads)
 
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=12,
-        tiles="OpenStreetMap",
+        tiles="CartoDB positron",
     )
 
-    # 图层 1: 覆盖率
-    coverage_layer = folium.FeatureGroup(name="覆盖率 (Coverage Ratio)", show=True)
-
+    # ── 图层 1: 全路网背景 (灰色细线) ──
+    bg_layer = folium.FeatureGroup(name="全路网 (背景)", show=True)
     for _, row in df.iterrows():
+        coords = [(lat, lon) for lon, lat in row["geometry"].coords]
+        folium.PolyLine(
+            coords,
+            color="#9e9e9e",
+            weight=1.5,
+            opacity=0.30,
+        ).add_to(bg_layer)
+    bg_layer.add_to(m)
+
+    # ── 图层 2: 匹配覆盖路段 (深蓝色，频次深浅) ──
+    matched = df[df["pass_count"] > 0]
+    cov_layer = folium.FeatureGroup(name="覆盖路段 (频次深浅)", show=True)
+
+    max_count = int(matched["pass_count"].max()) if len(matched) > 0 else 1
+
+    for _, row in matched.iterrows():
         geom = row["geometry"]
-        color = _coverage_color(row["coverage_ratio"])
         coords = [(lat, lon) for lon, lat in geom.coords]
+        color, opacity, weight = _blue_intensity(row["pass_count"], max_count)
+
+        popup_text = (
+            f"<b>{row['road_name'] or '未命名道路'}</b><br>"
+            f"覆盖频次: {row['pass_count']}<br>"
+            f"覆盖率: {row['coverage_ratio']:.1%}<br>"
+            f"道路等级: {row['highway_type']}"
+        )
 
         folium.PolyLine(
-            coords, color=color, weight=3, opacity=0.8,
-            popup=(
-                f"<b>{row['road_name'] or '未命名道路'}</b><br>"
-                f"覆盖率: {row['coverage_ratio']:.1%}<br>"
-                f"通行次数: {row['pass_count']}<br>"
-                f"道路等级: {row['highway_type']}"
-            ),
-        ).add_to(coverage_layer)
+            coords,
+            color=color,
+            weight=weight,
+            opacity=opacity,
+            popup=popup_text,
+        ).add_to(cov_layer)
 
-    coverage_layer.add_to(m)
+    cov_layer.add_to(m)
 
-    # 图层 2: 密度 (线宽映射)
-    density_layer = folium.FeatureGroup(name="覆盖密度 (Pass Count)", show=False)
-    max_count = int(df["pass_count"].max()) if len(df) > 0 else 1
-
-    for _, row in df.iterrows():
-        if row["pass_count"] == 0:
-            continue
-
-        geom = row["geometry"]
-        weight = _density_weight(row["pass_count"], max_count)
-        coords = [(lat, lon) for lon, lat in geom.coords]
-
-        folium.PolyLine(
-            coords, color="#3498db", weight=weight, opacity=0.7,
-            popup=(
-                f"<b>{row['road_name'] or '未命名道路'}</b><br>"
-                f"通行次数: {row['pass_count']}<br>"
-                f"覆盖率: {row['coverage_ratio']:.1%}"
-            ),
-        ).add_to(density_layer)
-
-    density_layer.add_to(m)
-
-    # 图例
-    legend_html = """
+    # ── 图例 ──
+    legend_html = f"""
     <div style="position:fixed;bottom:50px;left:50px;z-index:1000;
                 background:white;padding:10px;border-radius:5px;
-                border:1px solid #ccc;font-size:14px;">
-      <b>图例 — 覆盖率</b><br>
-      <span style="color:#2ecc71;">●</span> &gt;80% 覆盖良好<br>
-      <span style="color:#f1c40f;">●</span> 40%–80% 部分覆盖<br>
-      <span style="color:#e74c3c;">●</span> &lt;40% 覆盖不足<br>
+                border:1px solid #ccc;font-size:13px;">
+      <b>图例 — 覆盖频次</b><br>
+      <span style="color:#64b5f6;font-size:16px;">━━</span> 低频 (1次)<br>
+      <span style="color:#1565c0;font-size:16px;">━━</span> 中频<br>
+      <span style="color:#0d47a1;font-size:16px;">━━</span> 高频 ({max_count}次)<br>
+      <hr style="margin:4px 0;">
+      <span style="color:#9e9e9e;font-size:16px;">━━</span> 未覆盖路网
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))

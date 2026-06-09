@@ -64,20 +64,20 @@ def main():
     step_done(t, f"{len(G.nodes):,} 节点, {len(way_map):,} 路段")
 
     node_to_ways = build_node_to_ways(G)
-    pkl_path = Path("data") / f"node_ways_{config['date']}.pkl"
+    pkl_path = Path("data") / "node_ways.pkl"
     with open(pkl_path, "wb") as f:
         pickle.dump(node_to_ways, f)
 
     # ── Step 2: 匹配图 ──
     t = step_header(2, 6, "构建 HMM 匹配图")
     print("  将 OSM 路网转换为 leuvenmapmatching 地图...")
-    mmap_db_path = str(Path("data") / f"matching_graph_{config['date']}.db")
+    mmap_db_path = str(Path("data") / "matching_graph.db")
     mmap = build_matching_map(G, mmap_db_path, force_rebuild=args.force)
     step_done(t, f"db: {mmap_db_path}")
 
     # ── Step 3: CSV → Parquet + 坐标转换 ──
     t = step_header(3, 6, "CSV 加载 + 坐标转换")
-    raw_path = load_csv_to_parquet(Path(csv_path))
+    raw_path = load_csv_to_parquet(Path(csv_path), force=args.force)
 
     # # 输出原始坐标用于调试
     # _raw_df = pd.read_parquet(raw_path)
@@ -88,7 +88,7 @@ def main():
 
     coord_system = config.get("trajectory", {}).get("coord_system", args.coord)
     if coord_system == "gcj02":
-        wgs84_path = convert_coordinates(raw_path)
+        wgs84_path = convert_coordinates(raw_path, force=args.force)
     else:
         wgs84_path = raw_path  # 已是 WGS-84, 无需转换
 

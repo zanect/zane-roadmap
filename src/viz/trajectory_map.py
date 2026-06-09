@@ -30,7 +30,7 @@ def render_trajectory_map(
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=11,
-        tiles="OpenStreetMap",
+        tiles="CartoDB positron",
     )
 
     # Render trajectory per device

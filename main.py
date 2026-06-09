@@ -58,7 +58,7 @@ def main():
     print(f"数据: {csv_path}")
 
     # ── Step 1: 路网 ──
-    t = step_header(1, 7, "下载杭州 OSM 路网 (osmnx)")
+    t = step_header(1, 6, "下载杭州 OSM 路网 (osmnx)")
     print("  正在从 OpenStreetMap 下载...")
     G, way_map = load_road_network(config, force_download=args.force)
     step_done(t, f"{len(G.nodes):,} 节点, {len(way_map):,} 路段")
@@ -69,22 +69,22 @@ def main():
         pickle.dump(node_to_ways, f)
 
     # ── Step 2: 匹配图 ──
-    t = step_header(2, 7, "构建 HMM 匹配图")
+    t = step_header(2, 6, "构建 HMM 匹配图")
     print("  将 OSM 路网转换为 leuvenmapmatching 地图...")
     mmap_db_path = str(Path("data") / f"matching_graph_{config['date']}.db")
     mmap = build_matching_map(G, mmap_db_path, force_rebuild=args.force)
     step_done(t, f"db: {mmap_db_path}")
 
     # ── Step 3: CSV → Parquet + 坐标转换 ──
-    t = step_header(3, 7, "CSV 加载 + 坐标转换")
+    t = step_header(3, 6, "CSV 加载 + 坐标转换")
     raw_path = load_csv_to_parquet(Path(csv_path))
 
-    # 输出原始坐标用于调试
-    _raw_df = pd.read_parquet(raw_path)
-    _raw_df[["lon", "lat"]].to_csv(
-        Path("data/csv/test/origin_pos.csv"), index=False, header=False
-    )
-    print(f"  原始坐标已输出: data/csv/test/origin_pos.csv ({len(_raw_df)} 行)")
+    # # 输出原始坐标用于调试
+    # _raw_df = pd.read_parquet(raw_path)
+    # _raw_df[["lon", "lat"]].to_csv(
+    #     Path("data/csv/test/origin_pos.csv"), index=False, header=False
+    # )
+    # print(f"  原始坐标已输出: data/csv/test/origin_pos.csv ({len(_raw_df)} 行)")
 
     coord_system = config.get("trajectory", {}).get("coord_system", args.coord)
     if coord_system == "gcj02":
@@ -92,21 +92,21 @@ def main():
     else:
         wgs84_path = raw_path  # 已是 WGS-84, 无需转换
 
-    # 输出转换后坐标用于调试
-    _wgs_df = pd.read_parquet(wgs84_path)
-    _wgs_df[["lon", "lat"]].to_csv(
-        Path("data/csv/test/transform_pos.csv"), index=False, header=False
-    )
-    print(f"  转换后坐标已输出: data/csv/test/transform_pos.csv ({len(_wgs_df)} 行)")
-    if coord_system == "gcj02":
-        _delta_lon = (_wgs_df["lon"] - _raw_df["lon"]).mean()
-        _delta_lat = (_wgs_df["lat"] - _raw_df["lat"]).mean()
-        print(f"  GCJ-02 → WGS-84 平均偏移: dlon={_delta_lon:.6f}°, dlat={_delta_lat:.6f}°")
+    # # 输出转换后坐标用于调试
+    # _wgs_df = pd.read_parquet(wgs84_path)
+    # _wgs_df[["lon", "lat"]].to_csv(
+    #     Path("data/csv/test/transform_pos.csv"), index=False, header=False
+    # )
+    # print(f"  转换后坐标已输出: data/csv/test/transform_pos.csv ({len(_wgs_df)} 行)")
+    # if coord_system == "gcj02":
+    #     _delta_lon = (_wgs_df["lon"] - _raw_df["lon"]).mean()
+    #     _delta_lat = (_wgs_df["lat"] - _raw_df["lat"]).mean()
+    #     print(f"  GCJ-02 → WGS-84 平均偏移: dlon={_delta_lon:.6f}°, dlat={_delta_lat:.6f}°")
 
     step_done(t, f"coord_system={coord_system}")
 
     # ── Step 4: 地图匹配 ──
-    t = step_header(4, 7, "轨迹预处理 + 并行地图匹配")
+    t = step_header(4, 6, "轨迹预处理 + 并行地图匹配")
     print("  降噪 → trip切分 → DP抽稀 → HMM匹配 → way映射")
     matched_df = run_map_matching(wgs84_path, mmap_db_path, config)
     matched_path = Path("data") / f"matched_trips_{config['date']}.parquet"
@@ -114,7 +114,7 @@ def main():
     step_done(t, f"{len(matched_df)} 条匹配记录")
 
     # ── Step 5: 统计 ──
-    t = step_header(5, 7, "计算覆盖率 & 密度")
+    t = step_header(5, 6, "计算覆盖率 & 密度")
     print(f"  分段长度: {config['stats']['segment_length_m']}m")
     coverage_df = compute_coverage(
         matched_df, way_map,
@@ -132,7 +132,7 @@ def main():
               f"平均覆盖率 {coverage_df['coverage_ratio'].mean():.1%}")
 
     # # ── Step 6: 覆盖率地图 ──
-    t = step_header(6, 7, "生成覆盖率可视化")
+    t = step_header(6, 6, "生成覆盖率可视化")
     map_path = output_dir / config["output"]["map"]
     render_map(parquet_path, map_path)
     step_done(t, str(map_path))

@@ -2,7 +2,8 @@ date: "2026-06-08"
 
 # CSV 轨迹数据文件路径
 trajectory:
-  csv_path: "data/csv/pos/pos.csv"
+  csv_path: "data/csv/pos/hz_area.csv"
+  coord_system: "gcj02"  # 中国 GPS 数据通常为 GCJ-02，需转换为 WGS-84
 
 road_network:
   city: "杭州市"
@@ -22,8 +23,8 @@ preprocess:
   dp_epsilon_m: 10
 
 matching:
-  observation_sigma: 10
-  candidate_radius: 30
+  observation_sigma: 25   # GPS 观测噪声标准差 (米)，搜索半径 = 3x = 75m
+  candidate_radius: 75
   max_workers: 8
   device_chunk_size: 200
 

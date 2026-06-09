@@ -24,7 +24,17 @@ def build_matching_map(
         from leuvenmapmatching.map.sqlite import SqliteMap as SM
         print(f"  加载缓存: {db_path}")
         p = Path(db_path)
-        return SM(p.name, dir=str(p.parent), use_latlon=True, deserializing=True)
+        mmap = SM(p.name, dir=str(p.parent), use_latlon=True, deserializing=True)
+        if mmap.size() > 0:
+            return mmap
+        # 缓存损坏 (空库) → 删除并重建
+        print(f"  缓存为空，删除并重建: {db_path}")
+        mmap.db.close()
+        Path(db_path).unlink()
+
+    # 删除旧文件 (避免 SqliteMap 构造函数覆盖写入时的潜在问题)
+    if Path(db_path).exists():
+        Path(db_path).unlink()
 
     mmap = SqliteMap(db_path, use_latlon=True)
 

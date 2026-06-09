@@ -83,8 +83,11 @@ def convert_coordinates(
     """
     分块转换坐标 GCJ-02 → WGS-84。
 
-    逐批读取 → numpy 转换 → 逐批追加写入。
+    逐批读取 → numpy 转换 → 逐批追加写入 (通过 pyarrow ParquetWriter)。
     """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     input_path = Path(input_path)
     if output_path is None:
         stem = input_path.stem
@@ -94,37 +97,40 @@ def convert_coordinates(
     print(f"  总行数: {total:,}, 分块大小: {chunk_size:,}, "
           f"预计 {max(1, total // chunk_size)} 批")
 
-    first_batch = True
     offset = 0
     converted_total = 0
+    writer = None
 
-    while offset < total:
-        con = duckdb.connect()
-        chunk = con.execute(f"""
-            SELECT * FROM '{input_path}'
-            LIMIT {chunk_size} OFFSET {offset}
-        """).df()
-        con.close()
+    try:
+        while offset < total:
+            con = duckdb.connect()
+            chunk = con.execute(f"""
+                SELECT * FROM '{input_path}'
+                LIMIT {chunk_size} OFFSET {offset}
+            """).df()
+            con.close()
 
-        if len(chunk) == 0:
-            break
+            if len(chunk) == 0:
+                break
 
-        lng_wgs, lat_wgs = gcj02_to_wgs84(
-            chunk["lon"].values, chunk["lat"].values
-        )
-        chunk["lon"] = lng_wgs
-        chunk["lat"] = lat_wgs
+            lng_wgs, lat_wgs = gcj02_to_wgs84(
+                chunk["lon"].values, chunk["lat"].values
+            )
+            chunk["lon"] = lng_wgs
+            chunk["lat"] = lat_wgs
 
-        if first_batch:
-            chunk.to_parquet(output_path, index=False)
-            first_batch = False
-        else:
-            chunk.to_parquet(output_path, index=False, append=True)
+            table = pa.Table.from_pandas(chunk)
+            if writer is None:
+                writer = pq.ParquetWriter(str(output_path), table.schema)
+            writer.write_table(table)
 
-        converted_total += len(chunk)
-        offset += chunk_size
-        pct = min(100, converted_total * 100 // max(1, total))
-        print(f"  转换进度: {converted_total:,}/{total:,} ({pct}%)")
+            converted_total += len(chunk)
+            offset += chunk_size
+            pct = min(100, converted_total * 100 // max(1, total))
+            print(f"  转换进度: {converted_total:,}/{total:,} ({pct}%)")
+    finally:
+        if writer is not None:
+            writer.close()
 
     print(f"  转换完成: {output_path}")
     return output_path

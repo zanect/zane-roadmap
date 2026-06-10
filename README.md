@@ -72,8 +72,9 @@ python main.py --force
 ### 可视化
 
 - `output/coverage_map.html` — folium 覆盖率地图
-  - 图层 1: 覆盖率着色 (绿>80% · 黄40-80% · 红<40%)
-  - 图层 2: 密度线宽映射
+  - 图层 1: 全路网背景 (灰色细线)
+  - 图层 2: 匹配覆盖路段 (深蓝渐变，深浅对应 pass_count 频次)
+  - 图例: 左下角频次色卡
 - `output/trajectory_map.html` — 轨迹点散点图 (经过去重+采样，15万点 GeoJSON 渲染)
 
 ### 运行日志

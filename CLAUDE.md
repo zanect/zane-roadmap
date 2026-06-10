@@ -31,7 +31,7 @@ This is a **road network coverage calculator for Hangzhou, China**. It computes 
 4. Preprocess per-device (dedup → denoise → trip split → Douglas-Peucker simplification → adaptive start trimming) then parallel HMM matching; build device→road→district mapping
 5. Compute segment-based coverage ratio per road (with district attribution) and aggregate pass counts
 6. Generate folium coverage map (color-coded + density layers)
-7. Generate folium device trajectory map
+7. Generate trajectory scatter map (dedup → downsample to 150k → GeoJSON CircleMarker rendering)
 
 **Key modules:**
 
@@ -47,7 +47,7 @@ This is a **road network coverage calculator for Hangzhou, China**. It computes 
 | `src/matching/parallel.py` | Orchestrates parallel matching: chunks devices, spawns `ProcessPoolExecutor`, maps edges → OSM ways; collects per-batch failure reason statistics |
 | `src/stats/coverage.py` | Segment-based coverage ratio: projects matched points onto road geometry, bins into segments; outputs `district` field |
 | `src/viz/map.py` | Folium coverage map: green (>80%) / yellow (40-80%) / red (<40%) |
-| `src/viz/trajectory_map.py` | Folium device trajectory map with start/end markers |
+| `src/viz/trajectory_map.py` | Folium trajectory scatter map: loads lon/lat only, coordinate dedup, uniform downsample to 150k, GeoJSON+CircleMarker rendering |
 | `src/utils/logger.py` | `setup_logging()` redirects all stdout/stderr to timestamped log file via `_TeeWriter`; supports verbose (terminal+file) or silent (file-only) mode |
 
 **HMM matching details:**
@@ -84,7 +84,7 @@ Use `--force` to rebuild all caches.
 | `output/device_road_map.parquet` | device→road→district mapping with pass counts |
 | `output/device_summary.parquet` | Per-device road count and district coverage |
 | `output/coverage_map.html` | Folium color-coded coverage map |
-| `output/trajectory_map.html` | Folium device trajectory visualization |
+| `output/trajectory_map.html` | Folium trajectory scatter map (deduped, 150k points) |
 | `logs/pipeline_*.log` | Full run log with failure reason distribution |
 
 **Dependencies:** osmnx, leuvenmapmatching, duckdb, shapely, folium, numpy, scipy, tqdm, pyyaml, pandas, pytest, pyarrow.

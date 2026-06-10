@@ -74,7 +74,7 @@ python main.py --force
 - `output/coverage_map.html` — folium 覆盖率地图
   - 图层 1: 覆盖率着色 (绿>80% · 黄40-80% · 红<40%)
   - 图层 2: 密度线宽映射
-- `output/trajectory_map.html` — 设备轨迹地图
+- `output/trajectory_map.html` — 轨迹点散点图 (经过去重+采样，15万点 GeoJSON 渲染)
 
 ### 运行日志
 
@@ -89,6 +89,7 @@ python main.py --force
 [4/7] 轨迹预处理 + 并行地图匹配 (去重 → 降噪 → trip切分 → DP抽稀 → HMM匹配)
 [5/7] 计算覆盖率 & 密度统计 (含区县归属)
 [6/7] 生成 folium 覆盖率地图
+[7/7] 生成轨迹热力散点图 (去重+采样+GeoJSON点渲染)
 [7/7] 生成设备轨迹可视化
 ```
 

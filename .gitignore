@@ -1,10 +1,25 @@
-data/*.parquet
-data/*.csv
-data/*.db
-data/*.pkl
+# Data files (large, not version controlled)
+data/**/*.parquet
+data/**/*.csv
+data/**/*.db
+data/**/*.pkl
+data/**/*.geojson
+
+# Output files
 output/*.html
 output/*.parquet
+output/*.csv
+output/*.geojson
+
+# Python
 __pycache__/
 *.pyc
+
+# Secrets
 .env
+
+# Claude
 .superpowers/
+cache/
+.playwright-mcp/
+logs/

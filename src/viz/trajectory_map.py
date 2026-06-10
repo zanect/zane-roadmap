@@ -1,77 +1,105 @@
 """
 设备轨迹可视化。
 
-读取 WGS-84 坐标系的轨迹 Parquet，渲染到 OSM 底图上。
+读取 WGS-84 坐标系轨迹 Parquet，清洗去重后渲染到 OSM 底图上。
+数据流：只读 lon/lat → 坐标去重 → 全局采样 → GeoJSON 散点渲染。
 """
+import numpy as np
 import pandas as pd
 import folium
+from folium.features import GeoJson
 from pathlib import Path
+
+# 散点渲染上限
+MAX_RENDER_POINTS = 150_000
+
+
+def _load_and_dedup(parquet_path: Path) -> np.ndarray:
+    """只读 lon, lat 两列，按坐标去重，返回 (N, 2) ndarray。"""
+    print(f"[traj-map] Loading (lon,lat only)...")
+    df = pd.read_parquet(parquet_path, columns=["lon", "lat"])
+
+    raw = len(df)
+    print(f"[traj-map] Raw points: {raw:,}")
+
+    df = df.drop_duplicates(subset=["lon", "lat"])
+    dedup = len(df)
+    print(f"[traj-map] After dedup: {dedup:,} ({raw - dedup:,} removed)")
+
+    return df[["lon", "lat"]].to_numpy()
+
+
+def _downsample(coords: np.ndarray, max_points: int) -> np.ndarray:
+    """均匀采样到 max_points 以内。"""
+    n = len(coords)
+    if n <= max_points:
+        return coords
+
+    step = max(1, n // max_points)
+    sampled = coords[::step]
+    print(f"[traj-map] Downsampled: {n:,} -> {len(sampled):,} (step={step})")
+    return sampled
 
 
 def render_trajectory_map(
     trajectory_parquet: Path,
     output_path: Path,
+    max_render_points: int = MAX_RENDER_POINTS,
 ) -> None:
     """
     Args:
-        trajectory_parquet: WGS-84 坐标系轨迹 Parquet (device_id, lon, lat, timestamp)
+        trajectory_parquet: WGS-84 轨迹 Parquet (需含 lon, lat 列)
         output_path: 输出 HTML 路径
+        max_render_points: 全局渲染点上限，超出则均匀采样
     """
-    print("[traj-map] Loading trajectory (WGS-84)...")
-    traj_df = pd.read_parquet(trajectory_parquet)
+    # ── Step 1: 加载 + 去重 ──
+    coords = _load_and_dedup(trajectory_parquet)
 
-    print(f"[traj-map] lon [{traj_df['lon'].min():.4f}, {traj_df['lon'].max():.4f}], "
-          f"lat [{traj_df['lat'].min():.4f}, {traj_df['lat'].max():.4f}]")
+    # ── Step 2: 采样 ──
+    coords = _downsample(coords, max_render_points)
+    lons, lats = coords[:, 0], coords[:, 1]
 
-    # Center on trajectory
-    center_lat = (traj_df["lat"].min() + traj_df["lat"].max()) / 2
-    center_lon = (traj_df["lon"].min() + traj_df["lon"].max()) / 2
+    print(f"[traj-map] lon [{lons.min():.4f}, {lons.max():.4f}], "
+          f"lat [{lats.min():.4f}, {lats.max():.4f}]")
 
+    # ── Step 3: 构建 GeoJSON FeatureCollection ──
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
+            "properties": {},
+        }
+        for lon, lat in zip(lons, lats)
+    ]
+    geojson_data = {"type": "FeatureCollection", "features": features}
+
+    # ── Step 4: 散点渲染 ──
     m = folium.Map(
-        location=[center_lat, center_lon],
+        location=[lats.mean(), lons.mean()],
         zoom_start=11,
         tiles="CartoDB positron",
     )
 
-    # Render trajectory per device
-    print("[traj-map] Rendering trajectory...")
-    traj_layer = folium.FeatureGroup(name="Device Trajectory", show=True)
+    traj_layer = folium.FeatureGroup(name="Trajectory Points", show=True)
 
-    device_ids = traj_df["device_id"].unique()
-    all_coords = []
-
-    for device_id in device_ids:
-        dev_df = traj_df[traj_df["device_id"] == device_id].sort_values("timestamp")
-        # Downsample if >5000 points
-        step = max(1, len(dev_df) // 5000)
-        sampled = dev_df.iloc[::step]
-        coords = [(lat, lon) for lon, lat in zip(sampled["lon"], sampled["lat"])]
-        all_coords.extend(coords)
-
-        folium.PolyLine(
-            coords, color="#27ae60", weight=2.5, opacity=0.8,
-            popup=f"Device: {device_id}<br>Points: {len(dev_df)}",
-        ).add_to(traj_layer)
-
-        if len(coords) >= 1:
-            folium.CircleMarker(
-                coords[0], radius=6, color="white",
-                fill=True, fill_color="#3498db", fill_opacity=1,
-                popup=f"Start: {device_id}",
-            ).add_to(traj_layer)
-        if len(coords) >= 2:
-            folium.CircleMarker(
-                coords[-1], radius=6, color="white",
-                fill=True, fill_color="#e74c3c", fill_opacity=1,
-                popup=f"End: {device_id}",
-            ).add_to(traj_layer)
+    GeoJson(
+        geojson_data,
+        marker=folium.CircleMarker(
+            radius=2,
+            color="#27ae60",
+            fill=True,
+            fill_opacity=0.4,
+            weight=0,
+        ),
+    ).add_to(traj_layer)
 
     traj_layer.add_to(m)
 
-    if len(all_coords) >= 2:
-        m.fit_bounds(all_coords, padding=(30, 30))
+    if len(lons) >= 2:
+        m.fit_bounds([(lats.min(), lons.min()), (lats.max(), lons.max())],
+                     padding=(30, 30))
 
-    print(f"[traj-map] {len(device_ids)} devices, {len(all_coords):,} points")
+    print(f"[traj-map] Rendered {len(features):,} scatter points")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(output_path))

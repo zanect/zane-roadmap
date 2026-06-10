@@ -67,7 +67,7 @@ def main():
     print(f"数据: {csv_path}")
 
     # ── Step 1: 路网 ──
-    t = step_header(1, 6, "下载杭州 OSM 路网 (osmnx)")
+    t = step_header(1, 7, "下载杭州 OSM 路网 (osmnx)")
     print("  正在从 OpenStreetMap 下载...")
     G, way_map = load_road_network(config, force_download=args.force)
     step_done(t, f"{len(G.nodes):,} 节点, {len(way_map):,} 路段")
@@ -87,14 +87,14 @@ def main():
         pickle.dump(way_map, f)
 
     # ── Step 2: 匹配图 ──
-    t = step_header(2, 6, "构建 HMM 匹配图")
+    t = step_header(2, 7, "构建 HMM 匹配图")
     print("  将 OSM 路网转换为 leuvenmapmatching 地图...")
     mmap_db_path = str(Path("data") / "matching_graph.db")
     mmap = build_matching_map(G, mmap_db_path, force_rebuild=args.force)
     step_done(t, f"db: {mmap_db_path}")
 
     # ── Step 3: CSV → Parquet + 坐标转换 ──
-    t = step_header(3, 6, "CSV 加载 + 坐标转换")
+    t = step_header(3, 7, "CSV 加载 + 坐标转换")
     raw_path = load_csv_to_parquet(Path(csv_path), force=args.force)
 
     # # 输出原始坐标用于调试
@@ -124,7 +124,7 @@ def main():
     step_done(t, f"coord_system={coord_system}")
 
     # ── Step 4: 地图匹配 ──
-    t = step_header(4, 6, "轨迹预处理 + 并行地图匹配")
+    t = step_header(4, 7, "轨迹预处理 + 并行地图匹配")
     print("  降噪 → trip切分 → DP抽稀 → HMM匹配 → way映射")
     matched_df = run_map_matching(wgs84_path, mmap_db_path, config)
     matched_path = Path("data") / f"matched_trips_{config['date']}.parquet"
@@ -153,7 +153,7 @@ def main():
               f"{row['district_count']} 个区 ({row['districts']})")
 
     # ── Step 5: 统计 ──
-    t = step_header(5, 6, "计算覆盖率 & 密度")
+    t = step_header(5, 7, "计算覆盖率 & 密度")
     print(f"  分段长度: {config['stats']['segment_length_m']}m")
     coverage_df = compute_coverage(
         matched_df, way_map,
@@ -170,18 +170,18 @@ def main():
               f"({covered/max(1,total_roads)*100:.1f}%), "
               f"平均覆盖率 {coverage_df['coverage_ratio'].mean():.1%}")
 
-    # # ── Step 6: 覆盖率地图 ──
-    t = step_header(6, 6, "生成覆盖率可视化")
+    # ── Step 6: 覆盖率地图 ──
+    t = step_header(6, 7, "生成覆盖率可视化")
     map_path = output_dir / config["output"]["map"]
     render_map(parquet_path, map_path)
     step_done(t, str(map_path))
 
     # ── Step 7: 轨迹地图 ──
-    #t = step_header(7, 7, "生成设备轨迹可视化")
-    #traj_map_path = output_dir / "trajectory_map.html"
-    ## wgs84_path 数据已经是 WGS-84 坐标系（Step 3 已按 args.coord 处理）
-    #render_trajectory_map(wgs84_path, traj_map_path)
-    #step_done(t, str(traj_map_path))
+    t = step_header(7, 7, "生成设备轨迹可视化")
+    traj_map_path = output_dir / "trajectory_map.html"
+    # wgs84_path 数据已经是 WGS-84 坐标系（Step 3 已按 args.coord 处理）
+    render_trajectory_map(wgs84_path, traj_map_path)
+    step_done(t, str(traj_map_path))
 
     # ── 总结 ──
     total_time = time.time() - t0
@@ -190,7 +190,7 @@ def main():
     print(f"日志文件: {log_path}")
     print(f"覆盖率结果: {parquet_path}")
     print(f"覆盖率地图: {map_path}")
-    #print(f"轨迹地图: {traj_map_path}")
+    print(f"轨迹地图: {traj_map_path}")
 
 
 def _build_device_road_map(matched_df: pd.DataFrame, way_map: dict) -> pd.DataFrame:

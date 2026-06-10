@@ -1,15 +1,8 @@
-# Data files (large, not version controlled)
-data/**/*.parquet
-data/**/*.csv
-data/**/*.db
-data/**/*.pkl
-data/**/*.geojson
-
-# Output files
-output/*.html
-output/*.parquet
-output/*.csv
-output/*.geojson
+# Data & output — not version controlled (keep .gitkeep only)
+data/*
+!data/.gitkeep
+output/*
+!output/.gitkeep
 
 # Python
 __pycache__/
